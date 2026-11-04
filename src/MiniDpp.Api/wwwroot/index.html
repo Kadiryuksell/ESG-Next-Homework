@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini DPP – CSV içe aktarma</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #f4f6f5; color: #1d2b28; }
+    main { max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    section { background: #fff; padding: 1.5rem; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 1.5rem; }
+    h1 { margin: 0 0 1rem; } h2 { margin-top: 0; font-size: 1.15rem; }
+    form { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+    button { background: #1f6f5c; color: #fff; border: 0; padding: .55rem 1.1rem; border-radius: 8px; cursor: pointer; font-size: 1rem; }
+    button:disabled { opacity: .6; cursor: wait; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+    th, td { text-align: left; padding: .5rem .4rem; border-bottom: 1px solid #e3e8e6; vertical-align: top; }
+    th { color: #56635f; font-weight: 500; }
+    .summary { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .summary div { font-size: .9rem; color: #56635f; } .summary strong { display: block; font-size: 1.4rem; color: #1d2b28; }
+    .ok { color: #1f6f5c; } .err { color: #b3261e; }
+    ul { margin: 0; padding-left: 1.1rem; }
+    .links a { margin-right: .6rem; white-space: nowrap; color: #1f6f5c; }
+    .muted { color: #56635f; font-size: .9rem; }
+    img.qr { width: 64px; height: 64px; image-rendering: pixelated; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Mini Dijital Ürün Pasaportu</h1>
+
+  <section>
+    <h2>CSV içe aktar</h2>
+    <form id="import-form">
+      <input type="file" id="file" name="file" accept=".csv,text/csv" required>
+      <button type="submit" id="submit">Yükle</button>
+    </form>
+    <p class="muted">Beklenen başlık: <code>gtin,model_adi,batch_no,elyaf_pamuk_yuzde,elyaf_elastan_yuzde,uretim_yeri,karbon_kg_co2e</code></p>
+    <div id="result"></div>
+  </section>
+
+  <section>
+    <h2>Kayıtlı ürünler</h2>
+    <div id="products"><p class="muted">Yükleniyor…</p></div>
+  </section>
+</main>
+
+<script>
+  const form = document.getElementById('import-form');
+  const submit = document.getElementById('submit');
+  const resultBox = document.getElementById('result');
+  const productsBox = document.getElementById('products');
+
+  const statusText = { created: 'Oluşturuldu', updated: 'Güncellendi', unchanged: 'Değişmedi' };
+
+  // Yardımcı: güvenli DOM oluşturma (kullanıcı verisi her zaman textContent ile basılır).
+  function el(tag, props = {}, ...children) {
+    const node = document.createElement(tag);
+    Object.assign(node, props);
+    for (const child of children) node.append(child);
+    return node;
+  }
+
+  function table(headers, rows) {
+    return el('table', {},
+      el('thead', {}, el('tr', {}, ...headers.map(h => el('th', { textContent: h })))),
+      el('tbody', {}, ...rows));
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const file = document.getElementById('file').files[0];
+    if (!file) return;
+
+    submit.disabled = true;
+    resultBox.replaceChildren(el('p', { className: 'muted', textContent: 'İçe aktarılıyor…' }));
+
+    try {
+      const body = new FormData();
+      body.append('file', file);
+      const response = await fetch('/api/import', { method: 'POST', body });
+      const data = await response.json();
+
+      if (!response.ok) {
+        resultBox.replaceChildren(el('p', { className: 'err', textContent: data.detail ?? 'İçe aktarma başarısız.' }));
+        return;
+      }
+
+      renderReport(data);
+      await loadProducts();
+    } catch (error) {
+      resultBox.replaceChildren(el('p', { className: 'err', textContent: 'Sunucuya ulaşılamadı: ' + error.message }));
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  function renderReport(report) {
+    const summary = el('div', { className: 'summary' },
+      ...[
+        ['Toplam satır', report.totalRows],
+        ['Geçerli', report.validRows],
+        ['Hatalı', report.invalidRows],
+        ['Yeni', report.created],
+        ['Güncellenen', report.updated],
+        ['Değişmeyen', report.unchanged],
+      ].map(([label, value]) => el('div', {}, el('strong', { textContent: value }), label)));
+
+    const parts = [summary];
+
+    if (report.errors.length > 0) {
+      parts.push(el('h3', { className: 'err', textContent: 'Kaydedilmeyen satırlar' }));
+      parts.push(table(['CSV satırı', 'GTIN', 'Hata nedeni'],
+        report.errors.map(e => el('tr', {},
+          el('td', { textContent: e.row }),
+          el('td', { textContent: e.gtin ?? '—' }),
+          el('td', {}, el('ul', {}, ...e.messages.map(m => el('li', { textContent: m }))))))));
+    }
+
+    if (report.imported.length > 0) {
+      parts.push(el('h3', { className: 'ok', textContent: 'Kaydedilen satırlar' }));
+      parts.push(table(['CSV satırı', 'GTIN', 'Durum', 'Sürüm'],
+        report.imported.map(i => el('tr', {},
+          el('td', { textContent: i.row }),
+          el('td', { textContent: i.gtin }),
+          el('td', { textContent: statusText[i.status] ?? i.status }),
+          el('td', { textContent: i.version })))));
+    }
+
+    resultBox.replaceChildren(...parts);
+  }
+
+  async function loadProducts() {
+    const response = await fetch('/api/products');
+    const products = await response.json();
+
+    if (products.length === 0) {
+      productsBox.replaceChildren(el('p', { className: 'muted', textContent: 'Henüz ürün yok. Bir CSV yükleyin.' }));
+      return;
+    }
+
+    const link = (href, text) => el('a', { href, textContent: text, target: '_blank' });
+
+    productsBox.replaceChildren(table(['QR', 'GTIN', 'Model', 'Batch', 'Sürüm', 'Bağlantılar'],
+      products.map(p => el('tr', {},
+        el('td', {}, el('a', { href: p.links.qr, target: '_blank' },
+          el('img', { className: 'qr', src: p.links.qr, alt: 'QR ' + p.gtin }))),
+        el('td', { textContent: p.gtin }),
+        el('td', { textContent: p.modelName }),
+        el('td', { textContent: p.batchNo }),
+        el('td', { textContent: p.version }),
+        el('td', { className: 'links' },
+          link(p.links.passport, 'Pasaport'),
+          link(p.links.passportAuthorized, 'Pasaport (yetkili)'))))));
+  }
+
+  loadProducts().catch(() => productsBox.replaceChildren(el('p', { className: 'err', textContent: 'Ürün listesi alınamadı.' })));
+</script>
+</body>
+</html>
